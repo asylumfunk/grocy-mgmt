@@ -25,10 +25,7 @@ $(venv_requirements):  # Install python requirements from file
 
 .PHONY: main
 main:  ## Run the main python code
-	env \
-		'GROCY_API_HOST=$(GROCY_API_HOST)' \
-		'GROCY_API_PORT=$(GROCY_API_PORT)' \
-		'GROCY_API_KEY=$(GROCY_API_KEY)' \
 	$(PYTHON) \
 		src/grocy_mgmt/main.py \
+		import_chores_tsv \
 	;

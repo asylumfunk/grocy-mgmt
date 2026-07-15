@@ -4,8 +4,10 @@ Import chores to Grocy from a TSV file
 e.g. exported from Excel/Sheets
 
 """
+import argparse
 import csv
-from os import environ
+import json
+import os
 import sys
 
 # pylint: disable=import-error
@@ -17,10 +19,15 @@ from grocy.data_models.generic import EntityType
 # pylint: enable=import-error
 
 
-API_HOST = environ['GROCY_API_HOST']
-API_PORT = environ.get('GROCY_API_PORT', DEFAULT_PORT_NUMBER)
-API_KEY = environ['GROCY_API_KEY']
-GROCY = Grocy(API_HOST, API_KEY, port=API_PORT)
+APP_NAME = 'grocy-mgmt'
+USER_HOME = os.environ.get('HOME') or os.path.expanduser('~')
+CACHE_HOME_XDG = os.environ.get('XDG_CACHE_HOME') or os.path.join(USER_HOME, '.cache')
+CACHE_HOME_APP = os.path.join(CACHE_HOME_XDG, APP_NAME)
+CACHE_PATH_LOG = os.path.join(CACHE_HOME_APP, 'app.log')
+CONFIG_HOME_XDG = os.environ.get('XDG_CONFIG_HOME') or os.path.join(USER_HOME, '.config')
+CONFIG_HOME_APP = os.path.join(CONFIG_HOME_XDG, APP_NAME)
+CONFIG_PATH_JSON = os.path.join(CONFIG_HOME_APP, 'config.json')
+CONFIG_ENV_PREFIX = 'GROCY_MGMT_'  # Changing this value is a breaking change!
 
 CHORES_EPILOG = """
 Expected Line Format:
@@ -127,12 +134,10 @@ def _get_tsv_lines(input_path, users, has_header=True):
                 header = row
                 continue
             where, what, when, who, how, name = row
-            who = who.lower()
             if who == 'all':
                 for username in users_non_admin:
                     _what = '; '.join((what, username))
-                    _who = username.upper()
-                    yield (where, _what, when, _who, how, name)
+                    yield (where, _what, when, username, how, name)
             else:
                 yield row
     csv.unregister_dialect('TabSeparatedValues')
@@ -176,14 +181,129 @@ def _get_chore_data(name, description, user, when):
     return chore_data
 
 
-def _write_chore(chore, chore_data):
+def _write_chore(noop, api, chore, chore_data):
+    """
+    Create or update a chore
+    """
     if chore is not None:
-        response = GROCY.generic.update(EntityType.CHORES, object_id=chore.id, data=chore_data)
+        if not noop:
+            response = api.generic.update(EntityType.CHORES, object_id=chore.id, data=chore_data)
         print('Updated chore; object_id =', chore.id, file=sys.stderr)
     else:
-        response = GROCY.generic.create(EntityType.CHORES, chore_data)
-        object_id = int(response.get('created_object_id', '0'))
+        if not noop:
+            response = api.generic.create(EntityType.CHORES, chore_data)
+            object_id = int(response.get('created_object_id', '0'))
+        else:
+            object_id = -1
         print('Created chore; object_id =', object_id, file=sys.stderr)
+
+
+def _ensure_app_directories_exist():  # type: () -> None
+    """
+    Create necessary application directories
+    """
+    for _dir in (CONFIG_HOME_APP, CACHE_HOME_APP):
+        if not os.path.isdir(_dir):
+            try:
+                os.makedirs(_dir)
+            except FileExistsError:
+                pass
+
+
+def parse_args():  # type: () -> Dict[str, Any]
+    """
+    Parse and process configuration arguments
+
+    CLI > ENV > JSON > DEFAULTS
+    """
+    # pylint: disable=too-many-locals
+    script_name = os.path.split(sys.argv[0])[-1]
+    description = __doc__
+    parser = argparse.ArgumentParser(
+        prog=script_name,
+        description=description,
+    )
+    parser.add_argument(
+        '-c',
+        '--config',
+        help='Path to JSON config file',
+    )
+    parser.add_argument(
+        '-n',
+        '--noop',
+        action='store_true',
+        default=None,
+    )
+    parser.add_argument(
+        '-N',
+        '--no-noop',
+        action='store_false',
+        default=None,
+        dest='noop',
+    )
+    subparsers = parser.add_subparsers(dest='subcommand')
+    parser_import_chores = subparsers.add_parser(
+        'import_chores_tsv',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=CHORES_EPILOG,
+    )
+    parser_import_chores.add_argument(
+        '-a',
+        '--host-address',
+    )
+    parser_import_chores.add_argument(
+        '-p',
+        '--host-port',
+    )
+    parser_import_chores.add_argument(
+        '-P',
+        '--host-path',
+    )
+    parser_import_chores.add_argument(
+        '-k',
+        '--api-key',
+    )
+    parser_import_chores.add_argument(
+        '-i',
+        '--input-file-tsv',
+    )
+    args = parser.parse_args()
+    cli_settings = vars(args)
+    env_settings = {
+        key.lower()[len(CONFIG_ENV_PREFIX):]: value
+        for key, value in os.environ.items()
+        if key.startswith(CONFIG_ENV_PREFIX)
+    }
+    default_settings = {
+        'config': CONFIG_PATH_JSON,
+        'host_address': 'http://127.0.0.1',
+        'host_port': DEFAULT_PORT_NUMBER,
+        'host_path': '',
+        'noop': True,
+        'subcommand': 'import_chores_tsv',
+        'input_file_tsv': None,
+        'api_key': None,
+    }
+    config_path = str(
+        cli_settings['config']
+        or env_settings.get('config')
+        or default_settings['config']
+    )
+    with open(config_path, 'r', encoding='utf-8') as config_file:
+        json_settings = json.load(config_file)
+    join_settings = {
+        key: value if value is not None else (
+            env_settings.get(
+                key,
+                json_settings.get(
+                    key,
+                    default_settings.get(key)
+                )
+            )
+        )
+        for key, value in cli_settings.items()
+    }
+    return join_settings
 
 
 def main():
@@ -192,28 +312,31 @@ def main():
 
     TODO: Build name (C1+C2) or read it (C6)
     """
+    _ensure_app_directories_exist()
+    args = parse_args()
+    api = Grocy(args['host_address'], args['api_key'], port=args['host_port'])
     users = {
         user.username: user
-        for user in GROCY.users.list()
+        for user in api.users.list()
     }
     chores = {
         chore.name: chore
-        for chore in GROCY.chores.list(get_details=True)
+        for chore in api.chores.list(get_details=True)
     }
-    for row in _get_tsv_lines('var/chores.tsv', users):
+    for row in _get_tsv_lines(args['input_file_tsv'], users):
         where, what, when, who, how, _name = row
         if not (where and what):
             print("Skipping empty task", row, file=sys.stderr)
             continue
         chore_name = ': '.join((where, what))
-        user_name = who.lower()
-        user = users.get(user_name)
+        user = users.get(who)
         chore_data = _get_chore_data(name=chore_name, description=how, user=user, when=when)
         if chore_data is None:
             continue
         chore = chores.get(chore_name)
-        _write_chore(chore, chore_data)
-    GROCY.chores.calculate_next_assignments()
+        _write_chore(args['noop'], api, chore, chore_data)
+    if not args['noop']:
+        api.chores.calculate_next_assignments()
 
 
 if __name__ == '__main__':
