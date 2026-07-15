@@ -6,7 +6,10 @@ e.g. exported from Excel/Sheets
 """
 import argparse
 import csv
+from datetime import datetime
+from datetime import timezone  # type: ignore
 import json
+import logging
 import os
 import sys
 
@@ -19,6 +22,7 @@ from grocy.data_models.generic import EntityType
 # pylint: enable=import-error
 
 
+logger = logging.getLogger(__name__)
 APP_NAME = 'grocy-mgmt'
 USER_HOME = os.environ.get('HOME') or os.path.expanduser('~')
 CACHE_HOME_XDG = os.environ.get('XDG_CACHE_HOME') or os.path.join(USER_HOME, '.cache')
@@ -172,6 +176,7 @@ def _get_chore_data(name, description, user, when):
         chore_data.update(CHORE_PERIOD_TYPE[when])
     else:
         print("Skipping invalid frequency", name, when, file=sys.stderr)
+        logger.error("Skipping invalid frequency: %s; %s", name, when)
         return None
     chore_data = {
         key: value
@@ -189,6 +194,7 @@ def _write_chore(noop, api, chore, chore_data):
         if not noop:
             response = api.generic.update(EntityType.CHORES, object_id=chore.id, data=chore_data)
         print('Updated chore; object_id =', chore.id, file=sys.stderr)
+        logger.info("Updated chore; object_id=%s", chore.id)
     else:
         if not noop:
             response = api.generic.create(EntityType.CHORES, chore_data)
@@ -196,6 +202,7 @@ def _write_chore(noop, api, chore, chore_data):
         else:
             object_id = -1
         print('Created chore; object_id =', object_id, file=sys.stderr)
+        logger.info("Created chore; object_id=%s", object_id)
 
 
 def _ensure_app_directories_exist():  # type: () -> None
@@ -306,6 +313,22 @@ def parse_args():  # type: () -> Dict[str, Any]
     return join_settings
 
 
+def format_datetime_rfc3339(self, record, datefmt=None):
+    # type: (logging.Formatter, logging.LogRecord, Optional[str]) -> str
+    """
+    Format a datetime in RFC3339 format
+
+    used for logging, which doesn't support fractional seconds, by default
+    """
+    # pylint: disable=unused-argument
+    timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc)
+    return (
+        timestamp
+        .astimezone(tz=None)  # type: ignore
+        .isoformat()
+    )
+
+
 def main():
     """
     Import chores to Grocy from a TSV file
@@ -314,6 +337,15 @@ def main():
     """
     _ensure_app_directories_exist()
     args = parse_args()
+    logging.basicConfig(
+        filename=CACHE_PATH_LOG,
+        encoding='utf-8',
+        filemode='a',
+        level=logging.INFO,
+        format="%(asctime)s %(process)07d %(levelname)-8s %(module)s:%(funcName)s %(message)s",
+    )
+    setattr(logging.Formatter, 'formatTime', format_datetime_rfc3339)
+    logger.debug("Loaded config: %s", args)
     api = Grocy(args['host_address'], args['api_key'], port=args['host_port'])
     users = {
         user.username: user
@@ -327,6 +359,7 @@ def main():
         where, what, when, who, how, _name = row
         if not (where and what):
             print("Skipping empty task", row, file=sys.stderr)
+            logger.info("Skipping empty task: %s", row)
             continue
         chore_name = ': '.join((where, what))
         user = users.get(who)
